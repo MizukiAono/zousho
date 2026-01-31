@@ -67,31 +67,19 @@ flowchart TB
 flowchart TB
     subgraph VPC["VPC (10.0.0.0/16)"]
         subgraph AZ1["Availability Zone 1"]
-            subgraph PublicSubnet1["Public Subnet<br/>10.0.1.0/24"]
-                NAT1["NAT Gateway"]
+            subgraph PublicSubnet["Public Subnet<br/>10.0.1.0/24"]
+                NAT["NAT Gateway"]
             end
-            subgraph PrivateSubnet1["Private Subnet<br/>10.0.10.0/24"]
-                Lambda1["Lambda ENI"]
-                CodeBuild1["CodeBuild ENI"]
-                RDS1["RDS Primary"]
-            end
-        end
-
-        subgraph AZ2["Availability Zone 2"]
-            subgraph PublicSubnet2["Public Subnet<br/>10.0.2.0/24"]
-                NAT2["NAT Gateway"]
-            end
-            subgraph PrivateSubnet2["Private Subnet<br/>10.0.20.0/24"]
-                Lambda2["Lambda ENI"]
-                CodeBuild2["CodeBuild ENI"]
+            subgraph PrivateSubnet["Private Subnet<br/>10.0.10.0/24"]
+                Lambda["Lambda ENI"]
+                CodeBuild["CodeBuild ENI"]
+                RDS["RDS"]
             end
         end
     end
 
-    IGW["Internet Gateway"] --> PublicSubnet1
-    IGW --> PublicSubnet2
-    NAT1 --> PrivateSubnet1
-    NAT2 --> PrivateSubnet2
+    IGW["Internet Gateway"] --> PublicSubnet
+    NAT --> PrivateSubnet
 ```
 
 ---
