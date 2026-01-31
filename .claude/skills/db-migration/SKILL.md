@@ -1,16 +1,34 @@
 ---
-description: データベースマイグレーションを作成する手順ガイド。命名規則、テスト方法を含む。
+description: データベースマイグレーションを作成する手順ガイド。dbmate を使用したマイグレーション管理。
 user_invocable: true
 ---
 
 # データベースマイグレーション作成スキル
 
-PostgreSQL のマイグレーションファイルを作成するための手順ガイドです。
+dbmate を使用した PostgreSQL マイグレーションファイルの作成手順ガイドです。
 
 ## 前提条件
 
 - @docs/database-design.md でテーブル定義を確認
-- 既存のマイグレーションファイルの連番を確認
+- ローカル環境に dbmate がインストールされていること
+- Docker で PostgreSQL が起動していること
+
+## dbmate のインストール
+
+```bash
+# macOS
+brew install dbmate
+
+# Linux
+curl -fsSL https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64 \
+  -o /usr/local/bin/dbmate
+chmod +x /usr/local/bin/dbmate
+
+# Windows (WSL推奨)
+curl -fsSL https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64 \
+  -o /usr/local/bin/dbmate
+chmod +x /usr/local/bin/dbmate
+```
 
 ## マイグレーションファイルの配置
 
@@ -18,10 +36,10 @@ PostgreSQL のマイグレーションファイルを作成するための手順
 app/
 └── backend/
     └── migrations/
-        ├── 001_create_books_table.sql
-        ├── 002_create_rentals_table.sql
-        ├── 003_create_updated_at_trigger.sql
-        └── NNN_<description>.sql  # 新規追加
+        ├── 20240101000000_create_books_table.sql
+        ├── 20240101000001_create_rentals_table.sql
+        ├── 20240101000002_create_updated_at_trigger.sql
+        └── YYYYMMDDHHMMSS_<description>.sql  # 新規追加
 ```
 
 ## 命名規則
@@ -29,14 +47,13 @@ app/
 ### ファイル名
 
 ```
-{連番3桁}_{操作}_{テーブル名/対象}.sql
+{タイムスタンプ14桁}_{操作}_{テーブル名/対象}.sql
 ```
 
 **例:**
-- `004_add_category_to_books.sql`
-- `005_create_categories_table.sql`
-- `006_add_index_on_rentals_user_sub.sql`
-- `007_alter_books_add_publisher.sql`
+- `20240315120000_add_category_to_books.sql`
+- `20240315130000_create_categories_table.sql`
+- `20240315140000_add_index_on_rentals_user_sub.sql`
 
 ### 操作プレフィックス
 
@@ -48,71 +65,85 @@ app/
 | drop | カラム/テーブル削除 |
 | rename | 名前変更 |
 
+## 重要な原則：マイグレーションファイルはイミュータブル
+
+**一度作成・適用したマイグレーションファイルは絶対に編集しないでください。**
+
+### なぜ編集してはいけないのか
+
+マイグレーションファイルは各環境（開発、ステージング、本番）で順番に適用されます。一度適用されたファイルを編集すると：
+
+1. **環境間の不整合** - 既に適用済みの環境ではスキーマが古いまま、新しい環境では編集後のスキーマになる
+2. **ロールバック不可** - dbmate は適用済みファイルのハッシュを記録しており、ファイル変更後はロールバックが失敗する
+3. **チームメンバーの混乱** - 他の開発者のローカル環境と不整合が発生する
+
+### 正しい対処法
+
+| 状況 | 対処法 |
+|------|--------|
+| 適用前のファイルにミスを発見 | ファイルを編集してOK |
+| 適用後にカラム追加が必要 | 新しいマイグレーションファイルを作成 |
+| 適用後にミスを発見 | 修正用の新しいマイグレーションファイルを作成 |
+| テーブル定義を変更したい | ALTER TABLE を含む新しいファイルを作成 |
+
 ## 作成手順
 
-### Step 1: 次の連番を確認
+### Step 1: 新しいマイグレーションファイルを作成
 
 ```bash
-ls app/backend/migrations/
-# 最後のファイルの連番 + 1 を使用
+cd app/backend
+
+# dbmate コマンドで新規ファイル作成（推奨）
+dbmate new create_categories_table
+
+# または手動で作成（タイムスタンプは現在時刻）
+touch migrations/$(date +%Y%m%d%H%M%S)_create_categories_table.sql
 ```
 
-### Step 2: マイグレーションファイルを作成
+### Step 2: マイグレーションファイルを編集
 
 ```sql
--- Migration: NNN_description.sql
--- 作成日: YYYY-MM-DD
--- 説明: マイグレーションの目的を簡潔に記述
-
--- ============================================
--- UP: マイグレーション実行
--- ============================================
-
--- テーブル作成の場合
-CREATE TABLE new_table (
+-- migrate:up
+CREATE TABLE categories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL,
+    name VARCHAR(100) NOT NULL UNIQUE,
+    description TEXT,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- インデックス作成
-CREATE INDEX idx_new_table_name ON new_table (name);
+CREATE INDEX idx_categories_name ON categories (name);
 
--- コメント追加
-COMMENT ON TABLE new_table IS 'テーブルの説明';
-COMMENT ON COLUMN new_table.id IS 'カラムの説明';
+COMMENT ON TABLE categories IS 'カテゴリマスタ';
+COMMENT ON COLUMN categories.id IS 'カテゴリID';
+COMMENT ON COLUMN categories.name IS 'カテゴリ名';
 
--- ============================================
--- DOWN: ロールバック用（コメントで記載）
--- ============================================
--- DROP TABLE new_table;
+-- migrate:down
+DROP TABLE categories;
 ```
 
-### Step 3: SQL 構文を検証
+**重要**: `-- migrate:up` と `-- migrate:down` の両方を必ず記載すること。
+
+### Step 3: ローカルで動作確認
 
 ```bash
-# ローカル PostgreSQL で構文チェック
-psql -h localhost -U postgres -d zousho_test -f migrations/NNN_description.sql
+# 環境変数設定（.envファイルに記載も可）
+export DATABASE_URL="postgres://postgres:postgres@localhost:5432/zousho_dev?sslmode=disable"
 
-# または Docker コンテナで実行
-docker exec -i zousho-db psql -U postgres -d zousho_test < migrations/NNN_description.sql
-```
+# マイグレーション状態確認
+dbmate status
 
-### Step 4: テスト用データで動作確認
-
-```bash
-# テストデータベースにマイグレーション適用
-psql -h localhost -U postgres -d zousho_test -f migrations/NNN_description.sql
-
-# テーブル構造確認
-psql -h localhost -U postgres -d zousho_test -c "\d new_table"
+# マイグレーション実行
+dbmate up
 
 # ロールバックテスト
-psql -h localhost -U postgres -d zousho_test -c "DROP TABLE new_table;"
+dbmate rollback
+
+# 再度適用
+dbmate up
 ```
 
-### Step 5: docs/database-design.md を更新
+### Step 4: docs/database-design.md を更新
 
 新しいテーブルやカラムを追加した場合、設計書も更新してください。
 
@@ -121,40 +152,39 @@ psql -h localhost -U postgres -d zousho_test -c "DROP TABLE new_table;"
 ### カラム追加
 
 ```sql
--- Migration: 004_add_publisher_to_books.sql
+-- migrate:up
 ALTER TABLE books ADD COLUMN publisher VARCHAR(255);
-
 COMMENT ON COLUMN books.publisher IS '出版社';
 
--- DOWN: ALTER TABLE books DROP COLUMN publisher;
+-- migrate:down
+ALTER TABLE books DROP COLUMN publisher;
 ```
 
 ### カラム変更（NOT NULL 追加）
 
 ```sql
--- Migration: 005_make_isbn_not_null.sql
--- 既存データを更新
+-- migrate:up
 UPDATE books SET isbn = 'unknown' WHERE isbn IS NULL;
-
--- NOT NULL 制約追加
 ALTER TABLE books ALTER COLUMN isbn SET NOT NULL;
 
--- DOWN: ALTER TABLE books ALTER COLUMN isbn DROP NOT NULL;
+-- migrate:down
+ALTER TABLE books ALTER COLUMN isbn DROP NOT NULL;
 ```
 
 ### インデックス追加
 
 ```sql
--- Migration: 006_add_index_on_books_publisher.sql
+-- migrate:up
 CREATE INDEX CONCURRENTLY idx_books_publisher ON books (publisher);
 
--- DOWN: DROP INDEX idx_books_publisher;
+-- migrate:down
+DROP INDEX idx_books_publisher;
 ```
 
 ### 外部キー追加
 
 ```sql
--- Migration: 007_add_category_fk_to_books.sql
+-- migrate:up
 ALTER TABLE books
 ADD COLUMN category_id UUID,
 ADD CONSTRAINT books_category_id_fkey
@@ -163,22 +193,36 @@ ADD CONSTRAINT books_category_id_fkey
 
 CREATE INDEX idx_books_category_id ON books (category_id);
 
--- DOWN:
--- ALTER TABLE books DROP CONSTRAINT books_category_id_fkey;
--- ALTER TABLE books DROP COLUMN category_id;
+-- migrate:down
+ALTER TABLE books DROP CONSTRAINT books_category_id_fkey;
+DROP INDEX idx_books_category_id;
+ALTER TABLE books DROP COLUMN category_id;
 ```
 
 ### トリガー追加
 
 ```sql
--- Migration: 008_add_updated_at_trigger_to_new_table.sql
-CREATE TRIGGER update_new_table_updated_at
-    BEFORE UPDATE ON new_table
+-- migrate:up
+CREATE TRIGGER update_categories_updated_at
+    BEFORE UPDATE ON categories
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- DOWN: DROP TRIGGER update_new_table_updated_at ON new_table;
+-- migrate:down
+DROP TRIGGER update_categories_updated_at ON categories;
 ```
+
+## dbmate コマンド一覧
+
+| コマンド | 説明 |
+|----------|------|
+| `dbmate new <name>` | 新規マイグレーションファイル作成 |
+| `dbmate up` | 未適用のマイグレーションを全て適用 |
+| `dbmate rollback` | 直近のマイグレーションを1つロールバック |
+| `dbmate status` | マイグレーション状態を表示 |
+| `dbmate dump` | 現在のスキーマをダンプ（schema.sql） |
+| `dbmate create` | データベース作成 |
+| `dbmate drop` | データベース削除 |
 
 ## データベース命名規則
 
@@ -193,12 +237,14 @@ CREATE TRIGGER update_new_table_updated_at
 
 ## チェックリスト
 
-- [ ] 連番が正しい（既存の最大値 + 1）
+- [ ] 既存の適用済みマイグレーションファイルを編集していない（新規ファイルを作成した）
+- [ ] ファイル名がタイムスタンプ形式（YYYYMMDDHHMMSS）である
 - [ ] ファイル名が命名規則に従っている
-- [ ] UP（実行）のSQLが含まれている
-- [ ] DOWN（ロールバック）のSQLがコメントで含まれている
-- [ ] ローカル環境でテスト実行した
-- [ ] ロールバックもテストした
+- [ ] `-- migrate:up` セクションが含まれている
+- [ ] `-- migrate:down` セクションが含まれている
+- [ ] ローカル環境で `dbmate up` を実行した
+- [ ] ローカル環境で `dbmate rollback` を実行した（ロールバックテスト）
+- [ ] 再度 `dbmate up` で適用できることを確認した
 - [ ] docs/database-design.md を更新した
 - [ ] 本番環境への影響を考慮した（ロック、パフォーマンス）
 
@@ -209,10 +255,22 @@ CREATE TRIGGER update_new_table_updated_at
 1. **CONCURRENTLY オプション**: 大きなテーブルへのインデックス追加は `CREATE INDEX CONCURRENTLY` を使用
 2. **ロック時間**: ALTER TABLE は短時間で完了するようにする
 3. **データ移行**: 大量データの UPDATE は分割実行を検討
-4. **バックアップ**: マイグレーション前にスナップショットを取得
+4. **バックアップ**: マイグレーション前にRDSスナップショットを取得
 
 ### 禁止事項
 
-- 本番環境で直接 SQL を実行しない
-- マイグレーションファイルを後から編集しない（新しいファイルを作成）
-- 連番を飛ばさない
+- 本番環境で直接 SQL を実行しない（必ず dbmate 経由）
+- 適用済みのマイグレーションファイルを後から編集しない（新しいファイルを作成）
+- `-- migrate:down` セクションを省略しない
+
+## CI/CD での実行
+
+マイグレーションは GitHub Actions から CodeBuild を起動して実行されます。
+詳細は @docs/cicd-design.md を参照してください。
+
+```mermaid
+flowchart LR
+    GHA["GitHub Actions"] --> CB["CodeBuild (VPC内)"]
+    CB --> RDS["RDS PostgreSQL"]
+    CB -->|"dbmate up"| RDS
+```

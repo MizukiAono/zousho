@@ -34,6 +34,7 @@ flowchart TB
             end
             subgraph PrivateSubnet["Private Subnet"]
                 Lambda["Lambda<br/>Functions"]
+                CodeBuild["CodeBuild<br/>Migration"]
                 RDS["RDS<br/>PostgreSQL"]
             end
         end
@@ -54,6 +55,8 @@ flowchart TB
     Lambda --> RDS
     Lambda --> SM
     Lambda --> NAT
+    CodeBuild --> RDS
+    CodeBuild --> NAT
 ```
 
 ---
@@ -69,17 +72,18 @@ flowchart TB
             end
             subgraph PrivateSubnet1["Private Subnet<br/>10.0.10.0/24"]
                 Lambda1["Lambda ENI"]
+                CodeBuild1["CodeBuild ENI"]
                 RDS1["RDS Primary"]
             end
         end
 
         subgraph AZ2["Availability Zone 2"]
             subgraph PublicSubnet2["Public Subnet<br/>10.0.2.0/24"]
-                NAT2["NAT Gateway<br/>(prod only)"]
+                NAT2["NAT Gateway"]
             end
             subgraph PrivateSubnet2["Private Subnet<br/>10.0.20.0/24"]
                 Lambda2["Lambda ENI"]
-                RDS2["RDS Standby<br/>(prod only)"]
+                CodeBuild2["CodeBuild ENI"]
             end
         end
     end
@@ -175,6 +179,7 @@ sequenceDiagram
 | API Gateway | REST API エンドポイント。Cognito Authorizer で認証 |
 | Lambda | Python 3.12 でビジネスロジックを実行 |
 | RDS PostgreSQL | 書籍・貸出データを永続化 |
+| CodeBuild | VPC内でDBマイグレーション（dbmate）を実行 |
 
 ### 5.3 認証・セキュリティ
 
@@ -194,11 +199,16 @@ flowchart LR
         Lambda["Lambda"]
     end
 
+    subgraph SG_CodeBuild["CodeBuild SG"]
+        CodeBuild["CodeBuild"]
+    end
+
     subgraph SG_RDS["RDS SG"]
         RDS["RDS"]
     end
 
     Lambda -->|"5432/tcp"| RDS
+    CodeBuild -->|"5432/tcp"| RDS
 ```
 
 ### 6.1 Lambda セキュリティグループ
@@ -208,11 +218,19 @@ flowchart LR
 | Outbound | PostgreSQL | 5432 | RDS SG |
 | Outbound | HTTPS | 443 | 0.0.0.0/0 |
 
-### 6.2 RDS セキュリティグループ
+### 6.2 CodeBuild セキュリティグループ
+
+| ルール | タイプ | ポート | ソース/宛先 |
+|--------|--------|--------|-------------|
+| Outbound | PostgreSQL | 5432 | RDS SG |
+| Outbound | HTTPS | 443 | 0.0.0.0/0 |
+
+### 6.3 RDS セキュリティグループ
 
 | ルール | タイプ | ポート | ソース/宛先 |
 |--------|--------|--------|-------------|
 | Inbound | PostgreSQL | 5432 | Lambda SG |
+| Inbound | PostgreSQL | 5432 | CodeBuild SG |
 
 ---
 
@@ -254,7 +272,7 @@ flowchart TB
         S3_Prod["S3<br/>バージョニング有効"]
         APIGW_Prod["API Gateway<br/>スロットリング有効"]
         Lambda_Prod["Lambda<br/>Provisioned Concurrency"]
-        RDS_Prod["RDS<br/>db.t3.small<br/>Multi-AZ"]
+        RDS_Prod["RDS<br/>db.t3.small<br/>Single-AZ"]
         Cognito_Prod["Cognito<br/>MFA有効"]
     end
 
@@ -268,7 +286,7 @@ flowchart TB
 | 項目 | 設定 |
 |------|------|
 | RDS インスタンス | db.t3.small |
-| RDS Multi-AZ | 有効 |
+| RDS Multi-AZ | 無効 |
 | Lambda メモリ | 512MB |
 | Lambda Provisioned Concurrency | 2 |
 | CloudFront | WAF 有効 |
@@ -284,25 +302,55 @@ flowchart LR
         Code["コード<br/>プッシュ"]
     end
 
-    subgraph CI["CI/CD"]
-        GitHub["GitHub<br/>Actions"]
+    subgraph CI["GitHub Actions"]
         Test["テスト<br/>実行"]
         Build["ビルド"]
+        TF["Terraform<br/>Apply"]
+    end
+
+    subgraph AWS["AWS (VPC内)"]
+        CodeBuild["CodeBuild<br/>dbmate up"]
     end
 
     subgraph Deploy["デプロイ"]
-        TF["Terraform<br/>Apply"]
         S3Deploy["S3<br/>デプロイ"]
         LambdaDeploy["Lambda<br/>デプロイ"]
     end
 
-    Code --> GitHub
-    GitHub --> Test
+    Code --> Test
     Test --> Build
     Build --> TF
+    TF --> CodeBuild
+    CodeBuild --> LambdaDeploy
     TF --> S3Deploy
-    TF --> LambdaDeploy
 ```
+
+### 8.1 DBマイグレーション（CodeBuild + dbmate）
+
+マイグレーションファイルは `app/backend/migrations/` にタイムスタンプ形式で管理され、CodeBuild 経由で dbmate により実行される。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GH as GitHub Actions
+    participant CB as CodeBuild (VPC内)
+    participant RDS as PostgreSQL
+
+    GH->>CB: CodeBuild 起動
+    CB->>CB: dbmate バイナリ取得
+    CB->>RDS: dbmate up 実行
+    Note over CB,RDS: トランザクション内で<br/>未適用マイグレーション実行
+    RDS->>CB: 適用完了
+    CB->>CB: schema.sql 生成
+    CB->>GH: 実行結果
+```
+
+| コンポーネント | 説明 |
+|----------------|------|
+| migrations/ | dbmate形式のSQLマイグレーションファイル |
+| schema_migrations | dbmateが自動管理する適用済みテーブル |
+| CodeBuild | VPC内でdbmateを実行（RDSに直接接続可能） |
+| dbmate | 軽量マイグレーションツール（Go製シングルバイナリ） |
 
 ---
 

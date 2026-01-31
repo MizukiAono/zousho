@@ -18,6 +18,7 @@ flowchart TB
             FrontendUserTest["Frontend User<br/>Vitest"]
             FrontendAdminTest["Frontend Admin<br/>Vitest"]
             TerraformValidate["Terraform<br/>validate"]
+            MigrationValidate["Migration<br/>SQL検証"]
         end
         subgraph Quality["品質チェック（並列実行）"]
             BackendLint["Backend<br/>ruff + black"]
@@ -30,6 +31,7 @@ flowchart TB
     subgraph CD["CD: 継続的デリバリー"]
         Build["ビルド"]
         DeployDev["dev環境<br/>デプロイ"]
+        CodeBuild["CodeBuild<br/>dbmate up"]
         DeployProd["prod環境<br/>デプロイ"]
     end
 
@@ -41,7 +43,8 @@ flowchart TB
     Quality --> Coverage
     Coverage --> Build
     Build --> DeployDev
-    DeployDev --> DeployProd
+    DeployDev --> CodeBuild
+    CodeBuild --> DeployProd
 ```
 
 ---
@@ -134,6 +137,7 @@ flowchart TB
             FrontendUser["frontend-user-test"]
             FrontendAdmin["frontend-admin-test"]
             Terraform["terraform-validate"]
+            MigrationCheck["migration-validate"]
         end
 
         subgraph Parallel2["並列実行グループ2"]
@@ -208,18 +212,27 @@ flowchart TB
         BuildLambda["Lambda<br/>パッケージング"]
     end
 
-    subgraph Deploy["デプロイステージ"]
+    subgraph Deploy["デプロイステージ (GitHub Actions)"]
         TerraformPlan["Terraform Plan"]
         TerraformApply["Terraform Apply"]
+        TriggerCodeBuild["CodeBuild 起動"]
         S3Deploy["S3 アップロード"]
         CFInvalidate["CloudFront<br/>キャッシュ無効化"]
+    end
+
+    subgraph AWS["AWS VPC内"]
+        CodeBuild["CodeBuild<br/>dbmate up"]
+        RDS["RDS"]
     end
 
     BuildFrontendUser --> S3Deploy
     BuildFrontendAdmin --> S3Deploy
     BuildLambda --> TerraformApply
     TerraformPlan --> TerraformApply
-    TerraformApply --> S3Deploy
+    TerraformApply --> TriggerCodeBuild
+    TriggerCodeBuild --> CodeBuild
+    CodeBuild --> RDS
+    CodeBuild --> S3Deploy
     S3Deploy --> CFInvalidate
 ```
 
@@ -237,15 +250,20 @@ sequenceDiagram
     autonumber
     participant GH as GitHub Actions
     participant TF as Terraform
-    participant Lambda as AWS Lambda
+    participant CB as CodeBuild (VPC内)
+    participant RDS as PostgreSQL
     participant S3 as S3
     participant CF as CloudFront
 
     GH->>TF: terraform plan
     TF->>GH: Plan結果
     GH->>TF: terraform apply
-    TF->>Lambda: Lambda更新
-    TF->>GH: Apply完了
+    TF->>GH: Apply完了（Lambda更新含む）
+    GH->>CB: CodeBuild 起動 (start-build)
+    CB->>CB: dbmate バイナリ取得
+    CB->>RDS: dbmate up 実行
+    RDS->>CB: マイグレーション完了
+    CB->>GH: ビルド完了
     GH->>S3: フロントエンドアップロード
     S3->>GH: アップロード完了
     GH->>CF: キャッシュ無効化
@@ -261,10 +279,21 @@ sequenceDiagram
 ```
 .github/
 └── workflows/
-    ├── ci.yml              # CI: テスト・Lint
-    ├── deploy-dev.yml      # CD: dev環境デプロイ
-    ├── deploy-prod.yml     # CD: prod環境デプロイ
+    ├── ci.yml              # CI: テスト・Lint・マイグレーション検証
+    ├── deploy-dev.yml      # CD: dev環境デプロイ（CodeBuildでマイグレーション）
+    ├── deploy-prod.yml     # CD: prod環境デプロイ（CodeBuildでマイグレーション）
     └── terraform-plan.yml  # Terraform Plan（PR用）
+
+app/backend/
+├── migrations/             # dbmate形式マイグレーションファイル
+│   ├── 20240101000000_create_books_table.sql
+│   ├── 20240101000001_create_rentals_table.sql
+│   └── YYYYMMDDHHMMSS_<description>.sql
+└── buildspec.yml           # CodeBuild用ビルド仕様
+
+app/infra/
+└── modules/
+    └── codebuild/          # CodeBuildモジュール（Terraform）
 ```
 
 ### 6.2 ワークフロー詳細
@@ -281,6 +310,7 @@ sequenceDiagram
 | frontend-admin-lint | npm run lint | 常時 |
 | terraform-validate | terraform validate | infra変更時 |
 | terraform-fmt | terraform fmt -check | infra変更時 |
+| migration-validate | dbmate形式検証・SQL構文チェック | migrations変更時 |
 
 #### deploy-dev.yml
 
@@ -291,15 +321,16 @@ sequenceDiagram
 | 3. Build Frontend | npm run build (user, admin) |
 | 4. Package Lambda | zip パッケージ作成 |
 | 5. Terraform Apply | dev環境にインフラ適用 |
-| 6. Deploy to S3 | フロントエンド静的ファイルアップロード |
-| 7. Invalidate CloudFront | キャッシュ無効化 |
+| 6. DB Migration | CodeBuild起動 → dbmate up 実行 |
+| 7. Deploy to S3 | フロントエンド静的ファイルアップロード |
+| 8. Invalidate CloudFront | キャッシュ無効化 |
 
 #### deploy-prod.yml
 
 | ステップ | 実行内容 |
 |----------|----------|
 | 1. Approval | 手動承認待ち |
-| 2-7 | deploy-dev.yml と同様（prod環境向け） |
+| 2-8 | deploy-dev.yml と同様（prod環境向け） |
 
 ---
 
@@ -412,7 +443,43 @@ flowchart TB
 | Frontend | S3 前バージョン復元 + CF無効化 | 5-10分 |
 | Lambda | 前バージョンのエイリアス切り替え | 1-2分 |
 | Infrastructure | Terraform 前状態適用 | 10-30分 |
-| Database | 対応不可（マイグレーション設計で対策） | - |
+| Database | 下記参照 | ケースによる |
+
+### 9.3 DBマイグレーションのロールバック（dbmate）
+
+dbmate は `-- migrate:down` セクションでロールバックをサポート。
+
+```mermaid
+flowchart TB
+    subgraph Prevention["予防策"]
+        BackwardCompat["後方互換性を保つ"]
+        SmallChange["小さな変更に分割"]
+        DryRun["本番適用前のDry Run"]
+    end
+
+    subgraph Recovery["復旧手段"]
+        DbmateRollback["dbmate rollback"]
+        NewMigration["修正マイグレーション作成"]
+        Snapshot["RDSスナップショット復元"]
+    end
+```
+
+| 状況 | 対応方法 |
+|------|----------|
+| 直前のマイグレーションを取り消し | `dbmate rollback` を実行 |
+| カラム追加後に問題発覚 | `dbmate rollback` または新規マイグレーション |
+| データ破損 | RDSスナップショットから復元 |
+| 制約追加でエラー | `dbmate rollback` で制約を削除 |
+
+**重要**: 各マイグレーションファイルには必ず `-- migrate:down` セクションを記載すること。
+
+```sql
+-- migrate:up
+ALTER TABLE books ADD COLUMN publisher VARCHAR(255);
+
+-- migrate:down
+ALTER TABLE books DROP COLUMN publisher;
+```
 
 ---
 
@@ -533,6 +600,46 @@ jobs:
         working-directory: app/infra/environments/dev
       - run: terraform validate
         working-directory: app/infra/environments/dev
+
+  migration-validate:
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.modified, 'migrations/')
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zousho_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dbmate
+        run: |
+          curl -fsSL https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64 \
+            -o /usr/local/bin/dbmate
+          chmod +x /usr/local/bin/dbmate
+
+      - name: Validate migration file naming
+        run: |
+          # タイムスタンプ形式チェック (YYYYMMDDHHMMSS_description.sql)
+          for f in app/backend/migrations/*.sql; do
+            basename "$f" | grep -E '^[0-9]{14}_[a-z_]+\.sql$' || exit 1
+          done
+
+      - name: Test migrations with dbmate
+        run: |
+          dbmate --migrations-dir ./app/backend/migrations up
+          dbmate --migrations-dir ./app/backend/migrations rollback
+          dbmate --migrations-dir ./app/backend/migrations up
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zousho_test?sslmode=disable
 ```
 
 ### 11.2 deploy-dev.yml（概要）
@@ -590,6 +697,38 @@ jobs:
           terraform apply -auto-approve
         working-directory: app/infra/environments/dev
 
+      # DB Migration via CodeBuild
+      - name: Run DB Migrations
+        run: |
+          # CodeBuild 起動
+          BUILD_ID=$(aws codebuild start-build \
+            --project-name zousho-migration-${{ vars.ENVIRONMENT }} \
+            --source-version ${{ github.sha }} \
+            --query 'build.id' \
+            --output text)
+
+          echo "CodeBuild started: $BUILD_ID"
+
+          # 完了待ち（最大10分）
+          for i in {1..60}; do
+            STATUS=$(aws codebuild batch-get-builds \
+              --ids $BUILD_ID \
+              --query 'builds[0].buildStatus' \
+              --output text)
+
+            echo "Build status: $STATUS"
+
+            if [ "$STATUS" = "SUCCEEDED" ]; then
+              echo "Migration completed successfully"
+              break
+            elif [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "FAULT" ] || [ "$STATUS" = "STOPPED" ]; then
+              echo "Migration failed with status: $STATUS"
+              exit 1
+            fi
+
+            sleep 10
+          done
+
       # S3 Deploy
       - run: |
           aws s3 sync app/frontend/user/dist s3://${{ vars.S3_BUCKET_USER }} --delete
@@ -600,6 +739,133 @@ jobs:
           aws cloudfront create-invalidation \
             --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
             --paths "/*"
+```
+
+### 11.3 buildspec.yml（CodeBuild マイグレーション用）
+
+```yaml
+version: 0.2
+
+env:
+  secrets-manager:
+    DATABASE_URL: zousho-${ENVIRONMENT}/database:url
+
+phases:
+  install:
+    commands:
+      - echo "Installing dbmate..."
+      - curl -fsSL https://github.com/amacneil/dbmate/releases/latest/download/dbmate-linux-amd64 -o /usr/local/bin/dbmate
+      - chmod +x /usr/local/bin/dbmate
+      - dbmate --version
+
+  pre_build:
+    commands:
+      - echo "Checking database connection..."
+      - dbmate --migrations-dir ./app/backend/migrations status
+
+  build:
+    commands:
+      - echo "Running database migrations..."
+      - dbmate --migrations-dir ./app/backend/migrations up
+      - echo "Migrations completed successfully"
+
+  post_build:
+    commands:
+      - echo "Generating schema dump..."
+      - dbmate --migrations-dir ./app/backend/migrations dump > schema.sql
+      - echo "Migration status:"
+      - dbmate --migrations-dir ./app/backend/migrations status
+
+artifacts:
+  files:
+    - schema.sql
+  discard-paths: yes
+
+cache:
+  paths:
+    - /usr/local/bin/dbmate
+```
+
+### 11.4 CodeBuild プロジェクト設定（Terraform）
+
+```hcl
+# app/infra/modules/codebuild/main.tf
+
+resource "aws_codebuild_project" "migration" {
+  name          = "zousho-migration-${var.environment}"
+  description   = "Database migration runner using dbmate"
+  build_timeout = 10  # 10分
+
+  service_role = aws_iam_role.codebuild.arn
+
+  artifacts {
+    type = "NO_ARTIFACTS"
+  }
+
+  environment {
+    compute_type    = "BUILD_GENERAL1_SMALL"
+    image           = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
+    type            = "LINUX_CONTAINER"
+    privileged_mode = false
+
+    environment_variable {
+      name  = "ENVIRONMENT"
+      value = var.environment
+    }
+  }
+
+  source {
+    type            = "GITHUB"
+    location        = var.github_repo_url
+    git_clone_depth = 1
+    buildspec       = "app/backend/buildspec.yml"
+  }
+
+  vpc_config {
+    vpc_id             = var.vpc_id
+    subnets            = var.private_subnet_ids
+    security_group_ids = [aws_security_group.codebuild.id]
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name  = "/aws/codebuild/zousho-migration-${var.environment}"
+      stream_name = "build-log"
+    }
+  }
+
+  tags = {
+    Environment = var.environment
+    Purpose     = "database-migration"
+  }
+}
+
+resource "aws_security_group" "codebuild" {
+  name        = "zousho-codebuild-${var.environment}"
+  description = "Security group for CodeBuild migration runner"
+  vpc_id      = var.vpc_id
+
+  egress {
+    description     = "PostgreSQL to RDS"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [var.rds_security_group_id]
+  }
+
+  egress {
+    description = "HTTPS for external access"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "zousho-codebuild-${var.environment}"
+    Environment = var.environment
+  }
+}
 ```
 
 ---
