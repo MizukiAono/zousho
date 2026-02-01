@@ -90,7 +90,7 @@ resource "aws_db_parameter_group" "main" {
   # ログ設定
   parameter {
     name  = "log_statement"
-    value = "all"
+    value = var.log_statement
   }
 
   parameter {

@@ -23,7 +23,7 @@ resource "aws_secretsmanager_secret_version" "rds" {
     host     = aws_db_instance.main.address
     port     = aws_db_instance.main.port
     dbname   = aws_db_instance.main.db_name
-    # 接続文字列も含める
-    connection_string = "postgresql://${aws_db_instance.main.username}:${random_password.master.result}@${aws_db_instance.main.address}:${aws_db_instance.main.port}/${aws_db_instance.main.db_name}"
+    # 接続文字列も含める（特殊文字をURLエンコード）
+    connection_string = "postgresql://${urlencode(aws_db_instance.main.username)}:${urlencode(random_password.master.result)}@${aws_db_instance.main.address}:${aws_db_instance.main.port}/${aws_db_instance.main.db_name}"
   })
 }

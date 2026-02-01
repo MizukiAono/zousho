@@ -99,15 +99,15 @@ variable "maintenance_window" {
 }
 
 variable "deletion_protection" {
-  description = "削除保護の有効化"
+  description = "削除保護の有効化（本番環境推奨: true）"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "skip_final_snapshot" {
-  description = "削除時に最終スナップショットをスキップ"
+  description = "削除時に最終スナップショットをスキップ（本番環境推奨: false）"
   type        = bool
-  default     = true
+  default     = false
 }
 
 # -----------------------------------------------------------------------------
@@ -123,6 +123,20 @@ variable "codebuild_security_group_id" {
   description = "CodeBuild セキュリティグループ ID（接続許可用）"
   type        = string
   default     = ""
+}
+
+# -----------------------------------------------------------------------------
+# Logging Variables
+# -----------------------------------------------------------------------------
+variable "log_statement" {
+  description = "ログに記録するSQL文の種類（none/ddl/mod/all）。本番環境推奨: ddl"
+  type        = string
+  default     = "ddl"
+
+  validation {
+    condition     = contains(["none", "ddl", "mod", "all"], var.log_statement)
+    error_message = "log_statement must be one of: none, ddl, mod, all"
+  }
 }
 
 # -----------------------------------------------------------------------------
