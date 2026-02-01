@@ -21,9 +21,11 @@ paths: app/backend/**
 ```
 app/
 └── backend/
-    ├── handlers/       # Lambda ハンドラー
-    ├── models/         # データモデル
+    ├── handlers/       # Lambda ハンドラー（入出力処理）
+    ├── models/         # データモデル（Pydantic/SQLAlchemy）
+    ├── repositories/   # データアクセス層（DB CRUD操作）
     ├── services/       # ビジネスロジック
+    ├── db/             # DB接続設定・セッション管理
     ├── tests/          # pytest テスト
     ├── requirements.txt
     └── requirements-dev.txt
